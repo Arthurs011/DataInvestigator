@@ -1,0 +1,19 @@
+# Environment
+.env
+.venv/
+*.py[oc]
+__pycache__/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Runtime outputs
+data/raw/
+reports/
+*.png
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
