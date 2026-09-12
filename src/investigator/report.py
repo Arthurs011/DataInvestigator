@@ -189,6 +189,11 @@ def generate_report(result: InvestigationResult, outdir: Path) -> dict[str, Path
                   f"(matched {e.overlap_frac:.0%})")
     md.append("```")
     md.append("")
+    if result.executive_summary:
+        md.append("## Executive summary")
+        md.append("")
+        md.append(result.executive_summary)
+        md.append("")
     md.append("![Monthly revenue](chart_monthly_revenue.png)")
     md.append("")
     md.append("![Quarterly revenue](chart_quarterly_revenue.png)")

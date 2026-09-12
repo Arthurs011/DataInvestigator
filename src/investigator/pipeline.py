@@ -37,7 +37,7 @@ def run_pipeline(
     print("  " + join_graph_text(joins).replace("\n", "\n  "))
 
     print("[hypothesis] generating candidate findings with DuckDB evidence ...")
-    he = HypothesisEngine(ds, profiles, data_dir, config)
+    he = HypothesisEngine(ds, profiles, ds.raw, config)
     candidates = he.run()
     he.db.close()
 
@@ -45,13 +45,13 @@ def run_pipeline(
     ce = CausalEngine(ds, profiles, config)
     candidates = ce.test_all(candidates)
 
-    print("[ranking] scoring and ranking findings ...")
-    top = rank_findings(candidates, config)
-    print(f"  top {len(top)} findings selected")
+    print("[ranking] scoring candidate findings ...")
+    ranked = rank_findings(candidates, config, diversity=False)
 
-    print("[report] narrating findings and generating report ...")
+    print("[decision] selecting and narrating the report ...")
     reporter = LLMReporter(config)
-    ran_llm, llm_raw = reporter.narrate(top, profiles)
+    ran_llm, summary, top = reporter.decide(ranked, profiles, config.top_findings)
+    print(f"  selected {len(top)} findings (LLM decision: {'yes' if ran_llm else 'no'})")
 
     return InvestigationResult(
         data_dir=str(data_dir),
@@ -60,6 +60,7 @@ def run_pipeline(
         findings=top,
         ran_llm=ran_llm,
         duration_s=time.time() - t0,
+        executive_summary=summary,
     )
 
 

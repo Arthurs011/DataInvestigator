@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.15"
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run full test suite (unit + integration + ground truth)
+        run: uv run pytest -p no:warnings
+
+      - name: Ground-truth evaluation (recall 3/3, zero ghosting)
+        run: uv run python -m scripts.evaluate --orders 700 --customers 3500
+
+      - name: Loader generality — retail (Spanish) schema
+        run: uv run pytest -p no:warnings tests/test_retail_dataset.py

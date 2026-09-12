@@ -23,6 +23,22 @@ SYSTEM_PROMPT = (
     '"caveats": [str]}.'
 )
 
+DECISION_SYSTEM_PROMPT = (
+    "You are a data-science lead reviewing candidates produced by an autonomous "
+    "investigation engine. Every candidate is evidence-backed (numbers were "
+    "cross-verified with SQL). Your job:\n"
+    "1. Select the findings that matter most to a busy executive (not every "
+    "candidate is worth reporting).\n"
+    "2. Order your selection from most to least important.\n"
+    "3. For each selected finding write an honest narrative under 90 words — plain "
+    "language, no invented numbers, flag confounded/spurious causal verdicts.\n"
+    "4. Write a 2-4 sentence executive summary that a non-technical reader can act on.\n"
+    "Return STRICT JSON with exactly these keys:\n"
+    '{"summary": str, "selected_ids": [str], "findings": [{"id": str, "title": str, '
+    '"narrative": str, "confidence": float (0..1), "caveats": [str]}]}\n'
+    "selected_ids must use the candidate ids you were given, in priority order."
+)
+
 
 def _finding_payload(f: Finding) -> dict:
     return {
@@ -109,6 +125,35 @@ def _templated_narrative(f: Finding) -> tuple[str, float, list[str]]:
     return (f"{f.title}.", 0.5, [])
 
 
+def _templated_summary(findings: list[Finding]) -> str:
+    """Deterministic executive summary from the ranked findings' headlines."""
+    bits: list[str] = []
+    for f in findings:
+        h = f.headline
+        if f.kind == "time_change":
+            bits.append(
+                f"{f.target_metric} {h.get('period')} vs {h.get('prev_period')} changed "
+                f"{h.get('delta_pct', 0):+.1%}"
+            )
+        elif f.kind == "time_anomaly":
+            bits.append(f"an outlier month {h.get('period')} (z={h.get('z_score', 0):+.1f})")
+        elif f.kind == "graph" and "state" in h:
+            bits.append(f"{h.get('category')} over-indexing in {h.get('state')}")
+        elif f.kind == "segment_mover":
+            bits.append(f"segment {h.get('entity')} moving {h.get('delta_pct', 0):+.0%}")
+        elif f.kind == "association":
+            bits.append(f"correlation between {h.get('a')} and {h.get('b')}")
+    if not bits:
+        return (
+            f"The investigation surfaced {len(findings)} evidence-backed findings; "
+            "no single anomaly dominates the dataset's behaviour."
+        )
+    return (
+        f"The investigation surfaced {len(findings)} evidence-backed findings. The most "
+        f"material are: {'; '.join(bits[:6])}."
+    )
+
+
 class LLMReporter:
     def __init__(self, config: Config | None = None):
         self.config = config or Config()
@@ -156,6 +201,88 @@ class LLMReporter:
             for f in findings:
                 f.narrative, f.confidence, f.caveats = _templated_narrative(f)
             return False, ""
+
+    def decide(self, candidates: list[Finding], profiles: Profiles, top_findings: int) -> tuple[bool, str, list[Finding]]:
+        """Select, prioritize and narrate findings.
+
+        Returns (used_llm, executive_summary, selected_findings). Selection is the
+        LLM's job when a key is configured; otherwise the deterministic ranking is
+        kept and narratives are templated.
+        """
+        if not self.available:
+            return self._decide_deterministically(candidates, top_findings)
+        try:
+            payload = {
+                "tables": [
+                    {"name": p.name, "rows": p.n_rows, "cols": p.n_cols, "missing_frac": p.missing}
+                    for p in profiles.tables.values()
+                ],
+                "candidates": [
+                    {
+                        "id": f.id,
+                        "title": f.title,
+                        "kind": f.kind,
+                        "score": round(f.score, 3),
+                        **_finding_payload(f),
+                    }
+                    for f in candidates
+                ],
+            }
+            resp = self.client.chat.completions.create(
+                model=self.config.model,
+                messages=[
+                    {"role": "system", "content": DECISION_SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(payload)},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+            raw = resp.choices[0].message.content or ""
+            summary, selected = self._apply_decision(candidates, raw, top_findings)
+            return True, summary, selected
+        except Exception as e:
+            print(f"[llm_reporter] LLM decision call failed ({e}); falling back to deterministic ranking")
+            return self._decide_deterministically(candidates, top_findings)
+
+    def _decide_deterministically(self, candidates: list[Finding], top_findings: int) -> tuple[bool, str, list[Finding]]:
+        from .ranking import rank_findings
+
+        selected = rank_findings(candidates, self.config)[:top_findings]
+        for f in selected:
+            f.narrative, f.confidence, f.caveats = _templated_narrative(f)
+        return False, _templated_summary(selected), selected
+
+    def _apply_decision(self, candidates: list[Finding], raw: str, top_findings: int) -> tuple[str, list[Finding]]:
+        try:
+            doc = json.loads(raw)
+            summary = str(doc.get("summary") or "").strip()
+            ordered_ids = [str(i) for i in doc.get("selected_ids") or []]
+            by_id = {i["id"]: i for i in doc.get("findings") or []}
+        except (json.JSONDecodeError, TypeError):
+            return "", []
+        by_cand = {f.id: f for f in candidates}
+        ordered = [by_cand[i] for i in ordered_ids if i in by_cand]
+        if len(ordered) < len({i for i in ordered_ids if i in by_cand}):
+            ordered = list(dict.fromkeys(ordered))
+        extra = [f for f in candidates if f.id not in {f.id for f in ordered}]
+        extra.sort(key=lambda f: (-f.score, f.id))
+        ordered += extra
+        selected = ordered[:top_findings]
+        for f in selected:
+            item = by_id.get(f.id)
+            if item:
+                f.narrative = str(item.get("narrative") or f.narrative or "")
+                conf = item.get("confidence")
+                if isinstance(conf, (int, float)):
+                    f.confidence = float(min(max(conf, 0.0), 1.0))
+                else:
+                    f.confidence = f.confidence if f.confidence is not None else 0.6
+                extra_caveats = item.get("caveats") or []
+                if isinstance(extra_caveats, list):
+                    f.caveats = [str(c) for c in extra_caveats if str(c).strip()]
+            else:
+                f.narrative, f.confidence, f.caveats = _templated_narrative(f)
+        return summary or _templated_summary(selected), selected
 
     def _apply(self, findings: list[Finding], raw: str) -> None:
         try:

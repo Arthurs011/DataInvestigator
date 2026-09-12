@@ -43,9 +43,16 @@ Pipeline stages map to modules in `src/investigator/`:
 | Evidence ranking | `ranking.py` |
 | Report | `llm_reporter.py`, `report.py` |
 
-The engine is deterministic (reproducible); the LLM (OpenRouter) selects/prioritizes
-candidate findings and writes narrative prose. Every finding ships with DuckDB **SQL
-evidence** and pandas **Python evidence** so the numbers can be re-run by hand.
+The engine is deterministic (reproducible); the LLM (OpenRouter, default
+`openai/gpt-4o-mini`) is the **decision layer**: it selects and prioritizes from
+all ranked candidates, writes narrative prose, and produces an executive summary.
+Every finding ships with DuckDB **SQL** evidence and pandas **Python** evidence
+so the numbers can be re-run by hand.
+
+The loader is **schema-agnostic**: file and column names are canonicalized onto
+an internal schema, so datasets built with completely different vocabularies
+(e.g. the Spanish-named retail dataset in `scripts/synth_retail.py`) run through
+the same discovery, detection and evidence stages with no code changes.
 
 ## Setup
 
@@ -66,6 +73,35 @@ uv run python scripts/download_olist.py
 uv run investigator --data data/raw/olist --out reports/
 uv run investigator --data data/raw/olist --no-llm     # deterministic only (no API key)
 ```
+
+Investigate the second (retail) dataset to see schema generality:
+
+```bash
+uv run python scripts/synth_retail.py --out .eval/retail --anomalies
+uv run investigator --data .eval/retail --no-llm --out reports/retail
+```
+
+## Reproducible packaging
+
+```bash
+make setup fetch test eval   # uv-based targets (see Makefile)
+make report                  # deterministic Olist report
+make report-llm              # with the LLM decision layer
+
+docker build -t data-investigator .        # reproducible container (uv-frozen lock)
+docker run --rm -v "$PWD/data:/data" -v "$PWD/reports:/reports" \
+  data-investigator --data /data --out /reports
+
+# Continuous integration runs the full suite + ground-truth eval on every push:
+# see .github/workflows/ci.yml
+```
+
+## Documentation
+
+- [`docs/design.md`](docs/design.md) — system design: pipeline stages, data
+  model, canonical loader, evidence, causal testing, ranking, LLM decision layer.
+- [`docs/evaluation.md`](docs/evaluation.md) — evaluation methodology, ground
+  truth, results, generalization test, limitations.
 
 ## Development
 

@@ -106,6 +106,7 @@ class InvestigationResult:
     findings: list[Finding]
     ran_llm: bool
     duration_s: float = 0.0
+    executive_summary: str = ""
 
 
 @dataclass

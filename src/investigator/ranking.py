@@ -72,13 +72,15 @@ def score_finding(f: Finding, weights: tuple[float, float, float, float, float, 
     return float(s)
 
 
-def rank_findings(findings: list[Finding], config: Config | None = None) -> list[Finding]:
+def rank_findings(findings: list[Finding], config: Config | None = None, diversity: bool = True) -> list[Finding]:
     config = config or Config()
     for f in findings:
         f.score = score_finding(f)
     ranked = sorted(findings, key=lambda f: f.score, reverse=True)
     for i, f in enumerate(ranked, start=1):
         f.rank = i
+    if not diversity:
+        return ranked
     if len(ranked) <= config.top_findings:
         return ranked
     top = ranked[: config.top_findings]

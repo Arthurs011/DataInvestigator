@@ -46,30 +46,42 @@ def _period_parts(period: str) -> tuple[int, int]:
 
 
 class DBEV:
-    """DuckDB handle exposing clean SQL views over the raw CSVs."""
+    """DuckDB handle exposing clean SQL views over the loaded canonical tables.
 
-    def __init__(self, data_dir: str | Path):
-        self.data_dir = Path(data_dir)
+    Accepts either a directory (CSVs are loaded + canonicalized) or an already
+    loaded ``raw`` map of canonical tables, so evidence SQL always runs against
+    exactly the same data as the pandas fact table (even under row sampling).
+    """
+
+    _VIEW_COLS: dict[str, tuple[str, tuple[str, ...]]] = {
+        "orders": ("olist_orders_dataset", ("order_id", "customer_id", "order_status", "order_purchase_timestamp")),
+        "order_items": ("olist_order_items_dataset", ("order_id", "order_item_id", "product_id", "seller_id", "price", "freight_value")),
+        "customers": ("olist_customers_dataset", ("customer_id", "customer_state", "customer_city")),
+        "products": ("olist_products_dataset", ("product_id", "product_category_name")),
+        "categories": ("product_category_name_translation", ("product_category_name", "product_category_name_english")),
+        "payments": ("olist_order_payments_dataset", ("order_id", "payment_type", "payment_value")),
+        "reviews": ("olist_order_reviews_dataset", ("order_id", "review_score", "review_creation_date")),
+    }
+
+    def __init__(self, data_dir_or_raw: str | Path | dict[str, pd.DataFrame]):
         self.con = duckdb.connect()
-        self._register()
+        if isinstance(data_dir_or_raw, (str, Path)):
+            from .loader import load_raw
 
-    def _register(self) -> None:
-        mapping = {
-            "orders": ("olist_orders_dataset.csv", ["order_id", "customer_id", "order_status", "order_purchase_timestamp"]),
-            "order_items": ("olist_order_items_dataset.csv", ["order_id", "order_item_id", "product_id", "seller_id", "price", "freight_value"]),
-            "customers": ("olist_customers_dataset.csv", ["customer_id", "customer_state", "customer_city"]),
-            "products": ("olist_products_dataset.csv", ["product_id", "product_category_name"]),
-            "categories": ("product_category_name_translation.csv", ["product_category_name", "product_category_name_english"]),
-            "payments": ("olist_order_payments_dataset.csv", ["order_id", "payment_type", "payment_value"]),
-            "reviews": ("olist_order_reviews_dataset.csv", ["order_id", "review_score", "review_creation_date"]),
-        }
-        for view, (fname, cols) in mapping.items():
-            path = self.data_dir / fname
-            if path.exists():
-                cols_sql = ", ".join(f'"{c}"' for c in cols)
-                self.con.execute(
-                    f'CREATE VIEW {view} AS SELECT {cols_sql} FROM read_csv(\'{path.as_posix()}\')'
-                )
+            raw = load_raw(data_dir_or_raw)
+        else:
+            raw = data_dir_or_raw
+        self._register(raw)
+
+    def _register(self, raw: dict[str, pd.DataFrame]) -> None:
+        for view, (table, cols) in self._VIEW_COLS.items():
+            df = raw.get(table)
+            if df is None:
+                continue
+            sub = df[[c for c in cols if c in df.columns]].copy()
+            if view == "order_items" and "freight_value" not in sub.columns:
+                sub["freight_value"] = 0.0
+            self.con.register(view, sub)
 
     def exec(self, sql: str) -> pd.DataFrame:
         return self.con.execute(sql).df()
@@ -83,7 +95,7 @@ class HypothesisEngine:
         self,
         dataset: Dataset,
         profiles: Profiles,
-        data_dir: str | Path,
+        data_dir: str | Path | dict[str, pd.DataFrame] | None = None,
         config: Config | None = None,
     ):
         self.dataset = dataset
@@ -91,7 +103,7 @@ class HypothesisEngine:
         self.schema = dataset.schema
         self.fact = dataset.fact
         self.config = config or Config()
-        self.db = DBEV(data_dir)
+        self.db = DBEV(data_dir if data_dir is not None else dataset.raw)
         self._seq = 0
 
     def _id(self, kind: str) -> str:
