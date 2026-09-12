@@ -1,11 +1,15 @@
 # Reproducible project targets (uv-based)
 PY ?= uv run
 
-.PHONY: setup fetch test eval report report-retail report-llm html clean
+.PHONY: setup fetch test eval report report-retail report-llm assets html clean
 
 ## Install the environment (runtime + dev)
 setup:
 	uv sync --extra dev
+
+## Regenerate the README images (pipeline diagram + example charts from Olist)
+assets:
+	$(PY) python scripts/make_readme_assets.py
 
 ## Fetch the real Olist dataset into data/raw/olist
 fetch:

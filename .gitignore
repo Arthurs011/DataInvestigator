@@ -12,6 +12,7 @@ dist/
 data/raw/
 reports/
 *.png
+!docs/img/*.png
 .eval/
 
 # IDE

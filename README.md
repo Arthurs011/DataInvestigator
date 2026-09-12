@@ -1,137 +1,129 @@
 # DataInvestigator
 
-An autonomous AI "investigator" for real-world data. Give it a folder of CSVs and it
-investigates the dataset and returns an **Investigation Report** of evidence-backed
-findings — not just "average sales", but *"revenue decreased 18.3% in Q3, concentrated
-in Region X → Product A → Customer segment B (orders -31%), confidence 91%."*
+Turns a folder of CSVs into an investigation report. It looks for the kind of
+things you'd want flagged in sales data: a revenue drop in a quarter, a category
+that over-indexes in one region, an unusual month, or categories that get bought
+together. Instead of just printing a number, every finding ships with the SQL
+(and a small pandas snippet) used to compute it, so you can re-check the numbers
+by hand.
+
+I built this as a final-year major project. The starting gripe was that BI
+dashboards tell you *what* happened, not *what deserves attention* or whether an
+effect still shows up once you control for obvious confounders.
+
+## Quick start
+
+Requires Python 3.12 and `uv`.
 
 ```
-                   DATA
-                    │
-                    ▼
-             Data understanding
-                    │
-          ┌─────────┴─────────┐
-          ▼                   ▼
-    Statistical              Graph
-    investigation          discovery
-          │                   │
-          └─────────┬─────────┘
-                    ▼
-              Hypothesis engine
-                    │
-                    ▼
-              Causal testing
-                    │
-                    ▼
-             Evidence ranking
-                    │
-                    ▼
-              INVESTIGATION
-                 REPORT
-```
-
-Pipeline stages map to modules in `src/investigator/`:
-
-| Stage | Module |
-|---|---|
-| Data understanding | `loader.py`, `profile.py` |
-| Statistical investigation | `stats_engine.py` |
-| Graph discovery | `graph_engine.py` |
-| Hypothesis engine | `hypothesis_engine.py` |
-| Causal testing | `causal_engine.py` |
-| Evidence ranking | `ranking.py` |
-| Report | `llm_reporter.py`, `report.py` |
-
-The engine is deterministic (reproducible); the LLM (OpenRouter, default
-`openai/gpt-4o-mini`) is the **decision layer**: it selects and prioritizes from
-all ranked candidates, writes narrative prose, and produces an executive summary.
-Every finding ships with DuckDB **SQL** evidence and pandas **Python** evidence
-so the numbers can be re-run by hand.
-
-The loader is **schema-agnostic**: file and column names are canonicalized onto
-an internal schema, so datasets built with completely different vocabularies
-(e.g. the Spanish-named retail dataset in `scripts/synth_retail.py`) run through
-the same discovery, detection and evidence stages with no code changes.
-
-## Setup
-
-```bash
 uv sync
-cp .env.example .env        # add OPENROUTER_API_KEY
-```
-
-Fetch the real test dataset (Olist Brazilian e-commerce, 9 CSVs, ~50 MB):
-
-```bash
+cp .env.example .env        # only needed for the LLM step
 uv run python scripts/download_olist.py
-```
-
-## Run
-
-```bash
 uv run investigator --data data/raw/olist --out reports/
-uv run investigator --data data/raw/olist --no-llm     # deterministic only (no API key)
 ```
 
-Investigate the second (retail) dataset to see schema generality:
+That leaves you `reports/report.md` and `reports/report.html` (single file, charts
+and SQL inlined). To run without calling any API, which also skips the LLM step:
 
-```bash
-uv run python scripts/synth_retail.py --out .eval/retail --anomalies
-uv run investigator --data .eval/retail --no-llm --out reports/retail
+```
+uv run investigator --data data/raw/olist --no-llm --out reports/
 ```
 
-## Reproducible packaging
+## How it works
 
-```bash
-make setup fetch test eval   # uv-based targets (see Makefile)
-make report                  # deterministic Olist report
-make report-llm              # with the LLM decision layer
+data -> loader/profile -> stats + graph signals -> hypothesis engine -> causal
+check -> ranking -> [LLM] -> report
 
-docker build -t data-investigator .        # reproducible container (uv-frozen lock)
-docker run --rm -v "$PWD/data:/data" -v "$PWD/reports:/reports" \
-  data-investigator --data /data --out /reports
+![pipeline](docs/img/pipeline.png)
 
-# Continuous integration runs the full suite + ground-truth eval on every push:
-# see .github/workflows/ci.yml
+Everything up to ranking is deterministic, and it stays that way: same data in,
+same findings out. The LLM (OpenRouter, default `openai/gpt-4o-mini`) is the only
+non-deterministic part. It gets the already-computed numbers, evidence and causal
+verdicts, and its only jobs are to pick which findings to surface, order them, and
+explain them. If there's no API key, a templated fallback does the same thing, so
+the LLM is optional rather than load-bearing.
+
+Each finding carries two pieces of reproducible evidence:
+
+- SQL run against DuckDB views of the raw CSVs
+- a pandas one-liner that recomputes the headline number
+
+A finding is marked "verified" when the SQL result matches the engine's number
+within a small tolerance. That cross-check is the reason to believe the numbers
+at all.
+
+Reading the code? The files that matter:
+
+- `src/investigator/loader.py` - reads the CSVs and canonicalizes names. It is
+  deliberately not tied to one schema: the Spanish-named retail dataset generated
+  by `scripts/synth_retail.py` goes through the same code path as Olist.
+- `src/investigator/hypothesis_engine.py` - turns the statistical and graph
+  signals into findings plus the SQL evidence.
+- `src/investigator/causal_engine.py` - OLS with controls, bootstrap CI, and an
+  optional PC skeleton. Outputs `supported / confounded / spurious /
+  insufficient_data`; small tables usually land on the last one, which is an
+  honest "can't tell", not a result.
+- `src/investigator/llm_reporter.py` - the decision layer described above.
+- `scripts/evaluate.py` - the ground-truth harness below.
+
+## Does it actually find anything?
+
+Two answers.
+
+On the real Olist dataset, the top finding is genuine and cross-verified: revenue
+fell about 40% in Q3 2018, concentrated in São Paulo, with the drill-down chain
+and SQL in the report. For context, here is what the underlying series look like
+(the same charts end up in every report):
+
+![monthly revenue](docs/img/example_monthly_revenue.png)
+
+![quarterly revenue](docs/img/example_quarterly_revenue.png)
+
+There is also a ground-truth evaluation. `scripts/synth_data.py` generates fake
+data with three anomalies planted at known spots: a quarterly revenue drop, a
+furniture-over-index in a single state, and a one-month price spike. The harness
+runs the full pipeline on clean and injected copies, and passes only when all
+three are recovered and none appears on the clean copy:
+
 ```
-
-## Documentation
-
-- [`docs/design.md`](docs/design.md) — system design: pipeline stages, data
-  model, canonical loader, evidence, causal testing, ranking, LLM decision layer.
-- [`docs/evaluation.md`](docs/evaluation.md) — evaluation methodology, ground
-  truth, results, generalization test, limitations.
-
-## Development
-
-```bash
-uv sync --extra dev            # install pytest
-uv run pytest                  # full suite (unit + integration on Olist data)
-uv run pytest -m unit          # fast tests only
-```
-
-## Evaluation (ground truth)
-
-`scripts/synth_data.py` generates a synthetic dataset in Olist's schema with three
-**known** injected anomalies — the ground truth the investigator must rediscover:
-
-| Key | Anomaly | How it's detected |
-|---|---|---|
-| A | 2020Q3 revenue drop (price ×0.45) | quarterly `time_change` |
-| B | `furniture` ×5.0 revenue in state `TS` | geo×category `graph` over-index |
-| C | 2020-06 revenue spike (price ×4.0) | monthly `time_anomaly` (rolling z ≥ 2) |
-
-The harness builds a *clean* copy and an *injected* copy of the same seeded dataset,
-runs the full pipeline on both, and asserts **recall = 3/3 with zero ghosting** (an
-anomaly must appear only on the injected data):
-
-```bash
 uv run python -m scripts.evaluate --orders 700 --customers 3500
 ```
 
-Current result (seed 42): A rank 2, B rank 10, C rank 9 — all recovered, none ghosted.
-The same assertions ship as integration tests in `tests/test_ground_truth.py`.
+Currently 3/3 recovered, 0 ghosted, seed 42. This eval has already caught real
+bugs during development: an unseeded random draw made the dataset different on
+every run, and a matcher that ignored spike direction treated a clean-data dip as
+the injected spike.
 
-> Note: `build_dataset` seeds both the default and per-draw RNG, so every run is
-> reproducible; the pipeline must recover the anomalies deterministically.
+## Tests
+
+```
+uv sync --extra dev
+uv run pytest
+```
+
+The suite is 40 tests across unit, integration (Olist), the ground-truth eval, and
+the retail-schema loader test. Slow ones are tagged `slow`.
+
+## Reproducibility
+
+This was a pain point, so it's handled explicitly: every RNG in the code and in
+the data generators is seeded, the pipeline itself has no randomness, and the
+Dockerfile pins the uv lock. CI (`.github/workflows/ci.yml`) runs the full suite
+and the ground-truth eval on every push.
+
+See the `Makefile` for short targets: `make setup`, `make test`, `make eval`,
+`make report`, `make report-llm`.
+
+## Docs
+
+- `docs/design.md` - pipeline stages and design decisions
+- `docs/evaluation.md` - ground-truth methodology, results and limits
+
+## Known limitations
+
+- The ground-truth eval proves the three planted anomalies are recoverable on the
+  fixed seed; it does not give a false-positive rate over many seeds.
+- Causal claims are only as good as the panel size; small data gives
+  `insufficient_data`, deliberately.
+- LLM output is judged qualitatively, not scored. The numbers it quotes are
+  protected by the verified-evidence layer, but the prose itself is just prose.
