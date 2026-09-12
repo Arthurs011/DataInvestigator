@@ -17,13 +17,12 @@ from .ranking import rank_findings
 from .report import generate_report
 
 
-def investigate(
+def run_pipeline(
     data_dir: str | Path,
-    outdir: str | Path,
     config: Config | None = None,
     no_llm: bool = False,
-) -> dict[str, Path]:
-    """Run the full pipeline and write the Investigation Report."""
+) -> InvestigationResult:
+    """Run every investigation stage and return the InvestigationResult."""
     config = config or load_config()
     if no_llm:
         config.openrouter_api_key = ""
@@ -54,7 +53,7 @@ def investigate(
     reporter = LLMReporter(config)
     ran_llm, llm_raw = reporter.narrate(top, profiles)
 
-    result = InvestigationResult(
+    return InvestigationResult(
         data_dir=str(data_dir),
         profiles=profiles,
         join_graph=joins,
@@ -62,6 +61,16 @@ def investigate(
         ran_llm=ran_llm,
         duration_s=time.time() - t0,
     )
+
+
+def investigate(
+    data_dir: str | Path,
+    outdir: str | Path,
+    config: Config | None = None,
+    no_llm: bool = False,
+) -> dict[str, Path]:
+    """Run the full pipeline and write the Investigation Report."""
+    result = run_pipeline(data_dir, config, no_llm)
     print(f"[report] writing to {outdir} ...")
     paths = generate_report(result, Path(outdir))
     print(f"\nDone — total time {result.duration_s:.1f}s")

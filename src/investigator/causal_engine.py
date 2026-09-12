@@ -117,7 +117,9 @@ def _regression(panel: pd.DataFrame, target_col: str, controls: list[str]) -> tu
     y = data[target_col]
     X = data[["treatment"] + controls].copy()
     X["const"] = 1.0
-    model = sm.OLS(y, X.astype(float)).fit()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", sm.tools.sm_exceptions.SingularMatrixWarning)
+        model = sm.OLS(y, X.astype(float)).fit()
     coef = float(model.params["treatment"])
     p = float(model.pvalues["treatment"])
     rng = np.random.default_rng(42)
@@ -126,7 +128,9 @@ def _regression(panel: pd.DataFrame, target_col: str, controls: list[str]) -> tu
     for _ in range(200):
         idx = rng.integers(0, len(Xn), len(Xn))
         try:
-            m = sm.OLS(yn[idx], Xn[idx]).fit()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", sm.tools.sm_exceptions.SingularMatrixWarning)
+                m = sm.OLS(yn[idx], Xn[idx]).fit()
             boots.append(float(m.params[0]))
         except Exception:
             continue
@@ -180,7 +184,12 @@ class CausalEngine:
             if len(panel) < 50:
                 finding.causal = CausalVerdict("insufficient_data", "panel too sparse", details=["<50 panel rows"])
                 return finding
-            coef, p, ci = _regression(panel, "revenue", [c for c in CONTROLS if c in panel.columns])
+            controls = [c for c in CONTROLS if c in panel.columns and panel[c].notna().any()]
+            try:
+                coef, p, ci = _regression(panel, "revenue", controls)
+            except ValueError as e:  # not enough complete rows after dropna
+                finding.causal = CausalVerdict("insufficient_data", f"regression insufficient rows ({e})", details=["controls mostly missing"])
+                return finding
             skeleton = _pc_skeleton(panel, "revenue")
             verdict = _verdict(coef, p, ci, preceding=True)
             if skeleton:

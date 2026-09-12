@@ -74,3 +74,28 @@ uv sync --extra dev            # install pytest
 uv run pytest                  # full suite (unit + integration on Olist data)
 uv run pytest -m unit          # fast tests only
 ```
+
+## Evaluation (ground truth)
+
+`scripts/synth_data.py` generates a synthetic dataset in Olist's schema with three
+**known** injected anomalies — the ground truth the investigator must rediscover:
+
+| Key | Anomaly | How it's detected |
+|---|---|---|
+| A | 2020Q3 revenue drop (price ×0.45) | quarterly `time_change` |
+| B | `furniture` ×5.0 revenue in state `TS` | geo×category `graph` over-index |
+| C | 2020-06 revenue spike (price ×4.0) | monthly `time_anomaly` (rolling z ≥ 2) |
+
+The harness builds a *clean* copy and an *injected* copy of the same seeded dataset,
+runs the full pipeline on both, and asserts **recall = 3/3 with zero ghosting** (an
+anomaly must appear only on the injected data):
+
+```bash
+uv run python -m scripts.evaluate --orders 700 --customers 3500
+```
+
+Current result (seed 42): A rank 2, B rank 10, C rank 9 — all recovered, none ghosted.
+The same assertions ship as integration tests in `tests/test_ground_truth.py`.
+
+> Note: `build_dataset` seeds both the default and per-draw RNG, so every run is
+> reproducible; the pipeline must recover the anomalies deterministically.

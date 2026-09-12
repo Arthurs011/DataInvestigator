@@ -37,6 +37,7 @@ packages = ["src/investigator"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
 markers = [
     "unit: fast unit tests with no external data",
     "integration: tests that need the downloaded Olist data",
